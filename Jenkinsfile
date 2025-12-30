@@ -1,13 +1,39 @@
 pipeline {
-    agent any 
+    agent any
+
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['dev', 'pp', 'prod'],
+            description: 'Select environment to deploy'
+        )
+    }
 
     environment {
-        PROJECT_ID = 'resolute-bloom-476105-f9'  // GCP Project ID
-        DOCKER_HUB_CREDENTIALS_USR = 'afroz2022'  // Your Docker Hub username
-        IMAGE_NAME = 'cloudrunlab123'  // Docker image name
+        DOCKER_HUB_CREDENTIALS_USR = 'afroz2022'
+        IMAGE_NAME = 'cloudrunlab123'
+        REGION = 'us-central1'
     }
 
     stages {
+
+        stage('Set Environment Config') {
+            steps {
+                script {
+                    if (params.DEPLOY_ENV == 'dev') {
+                        env.PROJECT_ID = 'resolute-bloom-dev'
+                        env.SERVICE_NAME = 'cloudrunlab123-dev'
+                    } else if (params.DEPLOY_ENV == 'pp') {
+                        env.PROJECT_ID = 'resolute-bloom-pp'
+                        env.SERVICE_NAME = 'cloudrunlab123-pp'
+                    } else if (params.DEPLOY_ENV == 'prod') {
+                        env.PROJECT_ID = 'resolute-bloom-prod'
+                        env.SERVICE_NAME = 'cloudrunlab123-prod'
+                    }
+                }
+            }
+        }
+
         stage('Clone Repository') {
             steps {
                 git branch: 'main', url: 'https://github.com/anildevops999/cicd-run-axix-bank.git'
@@ -16,52 +42,51 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                script {
-                    sh "docker build -t ${DOCKER_HUB_CREDENTIALS_USR}/${IMAGE_NAME}:${BUILD_NUMBER} ."
+                sh "docker build -t ${DOCKER_HUB_CREDENTIALS_USR}/${IMAGE_NAME}:${BUILD_NUMBER} ."
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-hub-password',
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh """
+                        echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin
+                        docker push ${DOCKER_HUB_CREDENTIALS_USR}/${IMAGE_NAME}:${BUILD_NUMBER}
+                    """
                 }
             }
         }
 
-        stage('Push Docker Image to Docker Hub') {
+        stage('Approval for Prod') {
+            when {
+                expression { params.DEPLOY_ENV == 'prod' }
+            }
             steps {
-                script {
-                    withCredentials([usernamePassword(credentialsId: 'docker-hub-password', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
-                        sh "echo $DOCKER_PASSWORD | docker login -u $DOCKER_USERNAME --password-stdin"
-                        sh "docker push ${DOCKER_HUB_CREDENTIALS_USR}/${IMAGE_NAME}:${BUILD_NUMBER}"
-                    }
-                }
+                input message: 'Deploy to PRODUCTION?', ok: 'Deploy'
             }
         }
 
-        stage('Deploy to Google Cloud Run') {
+        stage('Deploy to Cloud Run') {
             steps {
-                script {
-                    // Authenticate with GCP using the service account key file stored in Jenkins credentials
-                    withCredentials([file(credentialsId: 'gcp-service-account', variable: 'GOOGLE_APPLICATION_CREDENTIALS')]) {
+                withCredentials([
+                    file(credentialsId: 'gcp-service-account', variable: 'GOOGLE_APPLICATION_CREDENTIALS')
+                ]) {
+                    sh """
+                        gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS
+                        gcloud config set project ${PROJECT_ID}
 
-                        // Explicitly activate the service account
-                        sh "gcloud auth activate-service-account --key-file=$GOOGLE_APPLICATION_CREDENTIALS"
-
-                        // Set the project
-                        sh "gcloud config set project ${PROJECT_ID}"
-
-                        // Deploy to Cloud Run
-                        sh """
-                            gcloud run deploy ${IMAGE_NAME} \
-                                --image docker.io/${DOCKER_HUB_CREDENTIALS_USR}/${IMAGE_NAME}:${BUILD_NUMBER} \
-                                --platform managed \
-                                --region us-central1 \
-                                --allow-unauthenticated
-                        """
-
-                        // Allow public access (if needed)
-                        sh """
-                            gcloud run services add-iam-policy-binding ${IMAGE_NAME} \
-                                --region us-central1 \
-                                --member='allUsers' \
-                                --role='roles/run.invoker'
-                        """
-                    }
+                        gcloud run deploy ${SERVICE_NAME} \
+                            --image docker.io/${DOCKER_HUB_CREDENTIALS_USR}/${IMAGE_NAME}:${BUILD_NUMBER} \
+                            --platform managed \
+                            --region ${REGION} \
+                            --allow-unauthenticated
+                    """
                 }
             }
         }
